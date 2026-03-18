@@ -1,6 +1,7 @@
 import { flow } from '@lit-labs/virtualizer/layouts/flow.js';
 import { css, html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { ifDefined } from 'lit/directives/if-defined.js';
 import { keyed } from 'lit/directives/keyed.js';
 import type { Ref } from 'lit/directives/ref.js';
 import { createRef, ref } from 'lit/directives/ref.js';
@@ -230,7 +231,13 @@ export class GlTreeGenerator extends GlElement {
 			}
 
 			if (decoration.type === 'text') {
-				return html`<span slot="decorations">${decoration.label}</span>`;
+				return html`<span
+					slot="decorations"
+					title=${ifDefined(decoration.tooltip)}
+					aria-label=${ifDefined(decoration.tooltip ?? decoration.label)}
+					style=${ifDefined(decoration.color ? `color: ${decoration.color}` : undefined)}
+					>${decoration.label}</span
+				>`;
 			}
 
 			// TODO: implement badge and indicator decorations

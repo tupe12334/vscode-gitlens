@@ -100,6 +100,7 @@ interface RebaseEditorContext {
 export class RebaseWebviewProvider implements Disposable {
 	private _branchName?: string | null;
 	private _closing: boolean = false;
+	private _conflictMarkerCache = new Map<string, { mtime: number; count: number }>();
 	private readonly _disposables: Disposable[] = [];
 	private _enrichment: Enrichment;
 	private readonly _todoDocument: RebaseTodoDocument;
@@ -871,13 +872,23 @@ export class RebaseWebviewProvider implements Disposable {
 		const { entries, lastAction } = await this.getDoneEntries();
 		if (!entries.length) return { status: undefined, doneEntries: undefined, conflictFiles: undefined };
 
-		const hasConflicts = await svc.status.hasConflictingFiles();
+		const files = await svc.status.getConflictingFiles();
+		const hasConflicts = files.length > 0;
+		if (!hasConflicts) {
+			this._conflictMarkerCache.clear();
+		}
 
 		// Fetch conflict file details when there are conflicts
 		let conflictFiles: ConflictFileInfo[] | undefined;
 		if (hasConflicts) {
-			const files = await svc.status.getConflictingFiles();
-			conflictFiles = files.map(f => ({ path: f.path, conflictStatus: f.conflictStatus }));
+			const counts = await Promise.allSettled(
+				files.map(f => this.countConflictMarkers(Uri.joinPath(Uri.file(this.repoPath), f.path))),
+			);
+			conflictFiles = files.map((f, i) => ({
+				path: f.path,
+				conflictStatus: f.conflictStatus,
+				conflictCount: getSettledValue(counts[i]),
+			}));
 		}
 
 		// Determine pause reason based on last done entry and conflict status
@@ -898,6 +909,30 @@ export class RebaseWebviewProvider implements Disposable {
 			doneEntries: entries,
 			conflictFiles: conflictFiles,
 		};
+	}
+
+	private static readonly conflictMarkerPattern = /^<{7}(?=[ \t\n\r])/gm;
+
+	private async countConflictMarkers(uri: Uri): Promise<number> {
+		try {
+			const stat = await workspace.fs.stat(uri);
+
+			const maxConflictFileSize = 5 * 1024 * 1024; // 5 MB
+			if (stat.size > maxConflictFileSize) return 0;
+
+			const key = uri.fsPath;
+			const cached = this._conflictMarkerCache.get(key);
+			if (cached?.mtime === stat.mtime) {
+				return cached.count;
+			}
+			const content = await workspace.fs.readFile(uri);
+			const text = new TextDecoder().decode(content);
+			const count = text.match(RebaseWebviewProvider.conflictMarkerPattern)?.length ?? 0;
+			this._conflictMarkerCache.set(key, { mtime: stat.mtime, count: count });
+			return count;
+		} catch {
+			return 0;
+		}
 	}
 
 	private notifyDidChangeAvatars(): void {

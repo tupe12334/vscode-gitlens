@@ -58,6 +58,8 @@ export interface State extends WebviewState<'gitlens.rebase'> {
 export interface ConflictFileInfo {
 	path: string;
 	conflictStatus: GitFileConflictStatus;
+	/** Number of conflict markers in the file */
+	conflictCount?: number;
 }
 
 /** Reason the rebase is paused */

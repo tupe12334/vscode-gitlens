@@ -1421,6 +1421,17 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 					{ icon: 'diff', label: 'Open Current Changes', action: 'current-changes' },
 					{ icon: 'git-compare', label: 'Open Incoming Changes', action: 'incoming-changes' },
 				],
+				decorations:
+					file.conflictCount != null && file.conflictCount > 0
+						? [
+								{
+									type: 'text' as const,
+									label: `${file.conflictCount}`,
+									tooltip: pluralize('conflict', file.conflictCount),
+									color: 'var(--vscode-editorWarning-foreground, #cca700)',
+								},
+							]
+						: undefined,
 			};
 		});
 	}
