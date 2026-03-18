@@ -193,6 +193,12 @@ export interface OpenConflictFileParams {
 }
 export const OpenConflictFileCommand = new IpcCommand<OpenConflictFileParams>(scope, 'conflicts/openFile');
 
+export interface OpenConflictChangesParams {
+	path: string;
+	side: 'current' | 'incoming';
+}
+export const OpenConflictChangesCommand = new IpcCommand<OpenConflictChangesParams>(scope, 'conflicts/openChanges');
+
 // REQUESTS
 
 export interface GetPotentialConflictsParams {

@@ -1,6 +1,7 @@
 import type { Disposable, TextDocument } from 'vscode';
-import { Uri, ViewColumn, workspace } from 'vscode';
+import { Uri, ViewColumn, window, workspace } from 'vscode';
 import { getAvatarUri, getAvatarUriFromGravatarEmail } from '../../avatars.js';
+import type { DiffWithCommandArgs } from '../../commands/diffWith.js';
 import type { GlWebviewCommandsOrCommandsWithSuffix } from '../../constants.commands.js';
 import type { RebaseEditorTelemetryContext } from '../../constants.telemetry.js';
 import type { Container } from '../../container.js';
@@ -11,10 +12,12 @@ import {
 	showPausedOperationStatus,
 	skipPausedOperation,
 } from '../../git/actions/pausedOperation.js';
+import { GitUri } from '../../git/gitUri.js';
 import type { GitCommit } from '../../git/models/commit.js';
 import type { ProcessedRebaseTodo, RebaseTodoAction } from '../../git/models/rebase.js';
 import { processRebaseEntries, readAndParseRebaseDoneFile } from '../../git/utils/-webview/rebase.parsing.utils.js';
 import { reopenRebaseTodoEditor } from '../../git/utils/-webview/rebase.utils.js';
+import { getConflictIncomingRef, resolveConflictFilePaths } from '../../git/utils/pausedOperationStatus.utils.js';
 import { createReference } from '../../git/utils/reference.utils.js';
 import type { Subscription } from '../../plus/gk/models/subscription.js';
 import { isSubscriptionTrialOrPaidFromState } from '../../plus/gk/utils/subscription.utils.js';
@@ -27,6 +30,7 @@ import { debug } from '../../system/decorators/log.js';
 import type { Deferrable } from '../../system/function/debounce.js';
 import { debounce } from '../../system/function/debounce.js';
 import { concat, filterMap, find, first, join, last, map } from '../../system/iterable.js';
+import { Logger } from '../../system/logger.js';
 import { extname, isAbsolute, normalizePath } from '../../system/path.js';
 import { getSettledValue } from '../../system/promise.js';
 import type { IpcParams, IpcResponse } from '../ipc/handlerRegistry.js';
@@ -59,6 +63,7 @@ import {
 	GetPotentialConflictsRequest,
 	MoveEntriesCommand,
 	MoveEntryCommand,
+	OpenConflictChangesCommand,
 	OpenConflictFileCommand,
 	RecomposeCommand,
 	ReorderCommand,
@@ -250,6 +255,62 @@ export class RebaseWebviewProvider implements Disposable {
 
 		const uri = Uri.joinPath(Uri.file(this.repoPath), normalizedPath);
 		await executeCoreCommand('vscode.open', uri, { viewColumn: ViewColumn.One });
+	}
+
+	@ipcCommand(OpenConflictChangesCommand)
+	@debug()
+	private async onOpenConflictChanges(params: IpcParams<typeof OpenConflictChangesCommand>): Promise<void> {
+		const normalizedPath = normalizePath(params.path);
+		if (normalizedPath.startsWith('..') || isAbsolute(normalizedPath)) return;
+
+		this.host.sendTelemetryEvent('rebaseEditor/action/openConflictChanges', {
+			side: params.side,
+		});
+
+		const svc = this.container.git.getRepositoryService(this.repoPath);
+		const pausedStatus = await svc.pausedOps?.getPausedOperationStatus?.();
+		if (pausedStatus?.type !== 'rebase' || pausedStatus.mergeBase == null) {
+			Logger.warn('onOpenConflictChanges: unable to open conflict changes — missing rebase status or merge base');
+			void window.showWarningMessage('Unable to open conflict changes — rebase status is no longer available');
+			return;
+		}
+
+		const incomingRef = getConflictIncomingRef(pausedStatus) ?? pausedStatus.HEAD.ref;
+		const mergeBase = pausedStatus.mergeBase;
+
+		// Resolve rename-aware paths (mirrors mergeConflictFileNode.ts pattern)
+		const [currentFilesResult, incomingFilesResult] = await Promise.allSettled([
+			svc.diff.getDiffStatus(mergeBase, 'HEAD', { renameLimit: 0 }),
+			svc.diff.getDiffStatus(mergeBase, incomingRef, { renameLimit: 0 }),
+		]);
+		const currentFiles = getSettledValue(currentFilesResult);
+		const incomingFiles = getSettledValue(incomingFilesResult);
+
+		let lhsPath: string;
+		let rhsPath: string;
+		if (params.side === 'current') {
+			({ lhsPath, rhsPath } = resolveConflictFilePaths(currentFiles, incomingFiles, normalizedPath));
+		} else {
+			// Swap: when viewing incoming changes, "my side" is the incoming ref
+			({ lhsPath, rhsPath } = resolveConflictFilePaths(incomingFiles, currentFiles, normalizedPath));
+		}
+
+		const ref = params.side === 'current' ? 'HEAD' : incomingRef;
+
+		await executeCommand<DiffWithCommandArgs>('gitlens.diffWith', {
+			lhs: {
+				sha: mergeBase,
+				uri: GitUri.fromFile(lhsPath, this.repoPath, mergeBase),
+				title: `${lhsPath} (merge-base)`,
+			},
+			rhs: {
+				sha: ref,
+				uri: GitUri.fromFile(rhsPath, this.repoPath, ref),
+				title: `${rhsPath} (${params.side === 'current' ? 'current' : 'incoming'})`,
+			},
+			repoPath: this.repoPath,
+			showOptions: { preserveFocus: false, preview: true, viewColumn: ViewColumn.One },
+		});
 	}
 
 	@ipcCommand(AbortCommand)

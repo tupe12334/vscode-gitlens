@@ -26,6 +26,7 @@ import {
 	isCommitEntry,
 	MoveEntriesCommand,
 	MoveEntryCommand,
+	OpenConflictChangesCommand,
 	OpenConflictFileCommand,
 	RecomposeCommand,
 	ReorderCommand,
@@ -39,7 +40,7 @@ import {
 } from '../../rebase/protocol.js';
 import { GlAppHost } from '../shared/appHost.js';
 import { scrollableBase } from '../shared/components/styles/lit/base.css.js';
-import type { TreeItemSelectionDetail, TreeModel } from '../shared/components/tree/base.js';
+import type { TreeItemActionDetail, TreeItemSelectionDetail, TreeModel } from '../shared/components/tree/base.js';
 import type { LoggerContext } from '../shared/contexts/logger.js';
 import type { HostIpc } from '../shared/ipc.js';
 import type { GlRebaseConflictIndicator } from './components/conflict-indicator.js';
@@ -1394,6 +1395,7 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 					aria-label="${pluralize('conflicted file', conflictFiles.length)}"
 					.model=${this._conflictTreeModel}
 					@gl-tree-generated-item-selected=${this.onConflictTreeItemSelected}
+					@gl-tree-generated-item-action-clicked=${this.onConflictTreeActionClicked}
 				></gl-tree-generator>
 			</div>`;
 	}
@@ -1415,12 +1417,30 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 				icon: { type: 'status', name: file.conflictStatus },
 				label: filename,
 				description: dir,
+				actions: [
+					{ icon: 'diff', label: 'Open Current Changes', action: 'current-changes' },
+					{ icon: 'git-compare', label: 'Open Incoming Changes', action: 'incoming-changes' },
+				],
 			};
 		});
 	}
 
 	private onConflictTreeItemSelected(e: CustomEvent<TreeItemSelectionDetail>): void {
 		this.onOpenConflictFile(e.detail.node.path);
+	}
+
+	private onConflictTreeActionClicked(e: CustomEvent<TreeItemActionDetail>): void {
+		const { action } = e.detail.action;
+		const { path } = e.detail.node;
+
+		switch (action) {
+			case 'current-changes':
+				this._ipc.sendCommand(OpenConflictChangesCommand, { path: path, side: 'current' });
+				break;
+			case 'incoming-changes':
+				this._ipc.sendCommand(OpenConflictChangesCommand, { path: path, side: 'incoming' });
+				break;
+		}
 	}
 
 	private onOpenConflictFile(path: string): void {
