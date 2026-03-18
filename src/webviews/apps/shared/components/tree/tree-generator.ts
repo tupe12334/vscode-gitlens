@@ -58,6 +58,12 @@ export class GlTreeGenerator extends GlElement {
 				/* Use layout containment instead of strict to avoid rendering issues */
 				/* Removed paint containment to allow tooltips to escape */
 				contain: layout;
+				/* lit-virtualizer sets an inline min-height based on its initial item-size
+				   estimate, which can exceed the scrollable container in small viewports and
+				   push scrolling onto the outer .scrollable div instead of the virtualizer's
+				   own scroller. Since height: 100% already provides correct sizing from the
+				   flex layout, the min-height is always redundant. */
+				min-height: 0 !important;
 			}
 
 			gl-tree-item {
