@@ -1,5 +1,5 @@
 import type { Disposable, TextDocument } from 'vscode';
-import { ViewColumn, workspace } from 'vscode';
+import { Uri, ViewColumn, workspace } from 'vscode';
 import { getAvatarUri, getAvatarUriFromGravatarEmail } from '../../avatars.js';
 import type { GlWebviewCommandsOrCommandsWithSuffix } from '../../constants.commands.js';
 import type { RebaseEditorTelemetryContext } from '../../constants.telemetry.js';
@@ -27,6 +27,7 @@ import { debug } from '../../system/decorators/log.js';
 import type { Deferrable } from '../../system/function/debounce.js';
 import { debounce } from '../../system/function/debounce.js';
 import { concat, filterMap, find, first, join, last, map } from '../../system/iterable.js';
+import { extname, isAbsolute, normalizePath } from '../../system/path.js';
 import { getSettledValue } from '../../system/promise.js';
 import type { IpcParams, IpcResponse } from '../ipc/handlerRegistry.js';
 import { ipcCommand, ipcRequest } from '../ipc/handlerRegistry.js';
@@ -37,6 +38,7 @@ import type { WebviewPanelShowCommandArgs } from '../webviewsController.js';
 import type {
 	Author,
 	Commit,
+	ConflictFileInfo,
 	RebaseActiveStatus,
 	RebaseEntry,
 	RebasePauseReason,
@@ -57,6 +59,7 @@ import {
 	GetPotentialConflictsRequest,
 	MoveEntriesCommand,
 	MoveEntryCommand,
+	OpenConflictFileCommand,
 	RecomposeCommand,
 	ReorderCommand,
 	RevealRefCommand,
@@ -233,6 +236,20 @@ export class RebaseWebviewProvider implements Disposable {
 		if (!this.host.visible) return;
 
 		void this.host.notify(DidChangeSubscriptionNotification, { subscription: subscription });
+	}
+
+	@ipcCommand(OpenConflictFileCommand)
+	@debug()
+	private async onOpenConflictFile(params: IpcParams<typeof OpenConflictFileCommand>): Promise<void> {
+		const normalizedPath = normalizePath(params.path);
+		if (normalizedPath.startsWith('..') || isAbsolute(normalizedPath)) return;
+
+		this.host.sendTelemetryEvent('rebaseEditor/action/openConflictFile', {
+			'conflict.fileExtension': extname(params.path),
+		});
+
+		const uri = Uri.joinPath(Uri.file(this.repoPath), normalizedPath);
+		await executeCoreCommand('vscode.open', uri, { viewColumn: ViewColumn.One });
 	}
 
 	@ipcCommand(AbortCommand)
@@ -653,9 +670,14 @@ export class RebaseWebviewProvider implements Disposable {
 			this._branchName = getSettledValue(branchResult)?.name ?? null;
 		}
 
-		const { status: rebaseStatus, doneEntries } = getSettledValue(rebaseStatusResult, {
+		const {
+			status: rebaseStatus,
+			doneEntries,
+			conflictFiles,
+		} = getSettledValue(rebaseStatusResult, {
 			status: undefined,
 			doneEntries: undefined,
+			conflictFiles: undefined,
 		});
 
 		const subscription = getSettledValue(subscriptionResult);
@@ -711,6 +733,7 @@ export class RebaseWebviewProvider implements Disposable {
 			rebaseStatus: rebaseStatus,
 			repoPath: this.repoPath,
 			subscription: subscription,
+			conflictFiles: conflictFiles,
 		};
 	}
 
@@ -776,17 +799,25 @@ export class RebaseWebviewProvider implements Disposable {
 	private async getRebaseStatus(svc: ReturnType<Container['git']['getRepositoryService']>): Promise<{
 		status: (RebaseActiveStatus & { onto: string }) | undefined;
 		doneEntries: RebaseEntry[] | undefined;
+		conflictFiles: ConflictFileInfo[] | undefined;
 	}> {
 		// Get paused operation status to check if we're in an active rebase
 		const pausedStatus = await svc.pausedOps?.getPausedOperationStatus?.();
 		if (pausedStatus?.type !== 'rebase' || !pausedStatus.hasStarted) {
-			return { status: undefined, doneEntries: undefined };
+			return { status: undefined, doneEntries: undefined, conflictFiles: undefined };
 		}
 
 		const { entries, lastAction } = await this.getDoneEntries();
-		if (!entries.length) return { status: undefined, doneEntries: undefined };
+		if (!entries.length) return { status: undefined, doneEntries: undefined, conflictFiles: undefined };
 
 		const hasConflicts = await svc.status.hasConflictingFiles();
+
+		// Fetch conflict file details when there are conflicts
+		let conflictFiles: ConflictFileInfo[] | undefined;
+		if (hasConflicts) {
+			const files = await svc.status.getConflictingFiles();
+			conflictFiles = files.map(f => ({ path: f.path, conflictStatus: f.conflictStatus }));
+		}
 
 		// Determine pause reason based on last done entry and conflict status
 		const pauseReason: RebasePauseReason | undefined = hasConflicts
@@ -804,6 +835,7 @@ export class RebaseWebviewProvider implements Disposable {
 				onto: pausedStatus.onto.ref,
 			},
 			doneEntries: entries,
+			conflictFiles: conflictFiles,
 		};
 	}
 

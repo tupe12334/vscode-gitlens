@@ -10,7 +10,13 @@ import { ifDefined } from 'lit/directives/if-defined.js';
 import type { RebaseTodoCommitAction } from '../../../git/models/rebase.js';
 import { filterMap, some } from '../../../system/iterable.js';
 import { pluralize } from '../../../system/string.js';
-import type { RebaseActiveStatus, RebaseCommitEntry, RebaseEntry, State } from '../../rebase/protocol.js';
+import type {
+	ConflictFileInfo,
+	RebaseActiveStatus,
+	RebaseCommitEntry,
+	RebaseEntry,
+	State,
+} from '../../rebase/protocol.js';
 import {
 	AbortCommand,
 	ChangeEntriesCommand,
@@ -20,6 +26,7 @@ import {
 	isCommitEntry,
 	MoveEntriesCommand,
 	MoveEntryCommand,
+	OpenConflictFileCommand,
 	RecomposeCommand,
 	ReorderCommand,
 	RevealRefCommand,
@@ -32,6 +39,7 @@ import {
 } from '../../rebase/protocol.js';
 import { GlAppHost } from '../shared/appHost.js';
 import { scrollableBase } from '../shared/components/styles/lit/base.css.js';
+import type { TreeItemSelectionDetail, TreeModel } from '../shared/components/tree/base.js';
 import type { LoggerContext } from '../shared/contexts/logger.js';
 import type { HostIpc } from '../shared/ipc.js';
 import type { GlRebaseConflictIndicator } from './components/conflict-indicator.js';
@@ -39,6 +47,7 @@ import type { GlRebaseEntryElement } from './components/rebase-entry.js';
 import { rebaseStyles } from './rebase.css.js';
 import { RebaseStateProvider } from './stateProvider.js';
 import '@lit-labs/virtualizer';
+import '../shared/components/tree/tree-generator.js';
 import './components/conflict-indicator.js';
 import './components/rebase-entry.js';
 import '../shared/components/banner/banner.js';
@@ -110,12 +119,35 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 	private _sortedEntries: RebaseEntry[] = [];
 	private _squashingIds = new Set<string>();
 	private _squashTargetIds = new Set<string>();
+
+	/** Cached conflict tree model */
+	private _conflictTreeModel: TreeModel[] = [];
+	private _prevConflictFiles: ConflictFileInfo[] | undefined;
+
+	/** Conflict panel divider drag state */
+	@state() private _conflictPanelHeight = 150;
+	private _isDraggingDivider = false;
+	private _dragStartY = 0;
+	private _dragStartHeight = 0;
+
 	/**
 	 * Number of non-editable entries (base + done) at the start of _sortedEntries.
 	 * In ascending mode, non-editable entries are at the start.
 	 * In descending mode, they are at the end (reversed), so this is 0 for index calculations.
 	 */
 	private _editableStartOffset = 0;
+
+	/** Cached conflict panel element reference (lazily queried, cleared on disconnect) */
+	private _conflictPanelEl: HTMLElement | null | undefined;
+	private get conflictPanelEl(): HTMLElement | null {
+		return (this._conflictPanelEl ??= this.shadowRoot?.querySelector<HTMLElement>('.conflict-panel') ?? null);
+	}
+
+	/** Cached conflict divider element reference (for ARIA updates during drag) */
+	private _conflictDividerEl: HTMLElement | null | undefined;
+	private get conflictDividerEl(): HTMLElement | null {
+		return (this._conflictDividerEl ??= this.shadowRoot?.querySelector<HTMLElement>('.conflict-divider') ?? null);
+	}
 
 	private get ascending(): boolean {
 		return this.state?.ascending ?? false;
@@ -163,6 +195,15 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 
 	override disconnectedCallback(): void {
 		document.removeEventListener('keydown', this.onDocumentKeyDown);
+		document.removeEventListener('mousemove', this.onDividerMouseMove);
+		document.removeEventListener('mouseup', this.onDividerMouseUp);
+		if (this._isDraggingDivider) {
+			this._isDraggingDivider = false;
+			document.body.style.cursor = '';
+			document.body.style.userSelect = '';
+		}
+		this._conflictPanelEl = undefined;
+		this._conflictDividerEl = undefined;
 		super.disconnectedCallback?.();
 	}
 
@@ -1121,6 +1162,13 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 		// Rebuild sorted entries and index map
 		this.refreshIndices();
 
+		// Recompute conflict tree model only when conflictFiles reference changes
+		const conflictFiles = this.state?.conflictFiles;
+		if (conflictFiles !== this._prevConflictFiles) {
+			this._prevConflictFiles = conflictFiles;
+			this._conflictTreeModel = this.buildConflictTreeModel(conflictFiles);
+		}
+
 		// Set initial focus and selection when entries first arrive
 		if (this.focusedEntryId == null && this._sortedEntries.length > 0) {
 			const baseId = this.state?.onto?.sha;
@@ -1189,28 +1237,31 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 					() => this.renderHeader(),
 				)}
 				${preservesMerges ? this.renderPreservesMergesBanner() : nothing}
-				${!isEmptyOrNoop
-					? html`<lit-virtualizer
-							role="list"
-							class="entries scrollable ${this.ascending ? 'ascending' : 'descending'}${this.rebaseStatus
-								?.hasConflicts
-								? ' has-conflicts'
-								: ''}"
-							autofocus
-							@click=${this.onListClick}
-							@keydown=${this.onListKeyDown}
-							@dragstart=${this.onDragStart}
-							@dragend=${this.onDragEnd}
-							@dragover=${this.onDragOver}
-							@dragleave=${this.onDragLeave}
-							@drop=${this.onDrop}
-							scroller
-							.items=${this._sortedEntries}
-							.keyFunction=${this.virtualizerKeyFn}
-							.layout=${flow({ direction: 'vertical' })}
-							.renderItem=${this.virtualizerRenderFn}
-						></lit-virtualizer>`
-					: html`<div class="entries-empty">No commits to rebase</div>`}
+				<div class="content">
+					${!isEmptyOrNoop
+						? html`<lit-virtualizer
+								role="list"
+								class="entries scrollable ${this.ascending ? 'ascending' : 'descending'}${this
+									.rebaseStatus?.hasConflicts
+									? ' has-conflicts'
+									: ''}"
+								autofocus
+								@click=${this.onListClick}
+								@keydown=${this.onListKeyDown}
+								@dragstart=${this.onDragStart}
+								@dragend=${this.onDragEnd}
+								@dragover=${this.onDragOver}
+								@dragleave=${this.onDragLeave}
+								@drop=${this.onDrop}
+								scroller
+								.items=${this._sortedEntries}
+								.keyFunction=${this.virtualizerKeyFn}
+								.layout=${flow({ direction: 'vertical' })}
+								.renderItem=${this.virtualizerRenderFn}
+							></lit-virtualizer>`
+						: html`<div class="entries-empty">No commits to rebase</div>`}
+					${this.renderConflictPanel()}
+				</div>
 				${this.renderFooter()}
 			</div>
 		`;
@@ -1316,6 +1367,126 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 			<span class="rebase-remaining">${status.totalSteps - status.currentStep} remaining</span>
 		</div>`;
 	}
+
+	private renderConflictPanel() {
+		const conflictFiles = this.state?.conflictFiles;
+		if (!conflictFiles?.length || !this.rebaseStatus?.hasConflicts) return nothing;
+
+		return html`<div
+				class="conflict-divider"
+				role="separator"
+				aria-orientation="horizontal"
+				aria-label="Resize conflict panel"
+				aria-valuenow=${this._conflictPanelHeight}
+				aria-valuemin=${50}
+				aria-valuemax=${500}
+				tabindex="0"
+				@mousedown=${this.onDividerMouseDown}
+				@keydown=${this.onDividerKeyDown}
+			></div>
+			<div class="conflict-panel" style="height: ${this._conflictPanelHeight}px">
+				<div class="conflict-panel__header">
+					<code-icon icon="warning" aria-hidden="true"></code-icon>
+					<span>${pluralize('conflicted file', conflictFiles.length)}</span>
+				</div>
+				<gl-tree-generator
+					class="conflict-panel__list"
+					aria-label="${pluralize('conflicted file', conflictFiles.length)}"
+					.model=${this._conflictTreeModel}
+					@gl-tree-generated-item-selected=${this.onConflictTreeItemSelected}
+				></gl-tree-generator>
+			</div>`;
+	}
+
+	private buildConflictTreeModel(conflictFiles: ConflictFileInfo[] | undefined): TreeModel[] {
+		if (!conflictFiles?.length) return [];
+
+		return conflictFiles.map(file => {
+			const lastSlash = file.path.lastIndexOf('/');
+			const dir = lastSlash !== -1 ? file.path.substring(0, lastSlash + 1) : '';
+			const filename = lastSlash !== -1 ? file.path.substring(lastSlash + 1) : file.path;
+
+			return {
+				branch: false,
+				expanded: true,
+				path: file.path,
+				level: 1,
+				checkable: false,
+				icon: { type: 'status', name: file.conflictStatus },
+				label: filename,
+				description: dir,
+			};
+		});
+	}
+
+	private onConflictTreeItemSelected(e: CustomEvent<TreeItemSelectionDetail>): void {
+		this.onOpenConflictFile(e.detail.node.path);
+	}
+
+	private onOpenConflictFile(path: string): void {
+		this._ipc.sendCommand(OpenConflictFileCommand, { path: path });
+	}
+
+	private onDividerKeyDown = (e: KeyboardEvent) => {
+		const step = e.shiftKey ? 50 : 10;
+		let newHeight: number | undefined;
+
+		switch (e.key) {
+			case 'ArrowUp':
+				newHeight = Math.min(500, Math.max(50, this._conflictPanelHeight + step));
+				break;
+			case 'ArrowDown':
+				newHeight = Math.min(500, Math.max(50, this._conflictPanelHeight - step));
+				break;
+			default:
+				return;
+		}
+
+		e.preventDefault();
+		this._conflictPanelHeight = newHeight;
+		const panel = this.conflictPanelEl;
+		if (panel) {
+			panel.style.height = `${newHeight}px`;
+		}
+	};
+
+	private onDividerMouseDown = (e: MouseEvent) => {
+		e.preventDefault();
+		this._isDraggingDivider = true;
+		this._dragStartY = e.clientY;
+		this._dragStartHeight = this._conflictPanelHeight;
+		document.body.style.cursor = 'row-resize';
+		document.body.style.userSelect = 'none';
+		document.addEventListener('mousemove', this.onDividerMouseMove);
+		document.addEventListener('mouseup', this.onDividerMouseUp);
+	};
+
+	private onDividerMouseMove = (e: MouseEvent) => {
+		if (!this._isDraggingDivider) return;
+
+		// Dragging up increases panel height; CSS flex-shrink constrains the layout
+		const delta = this._dragStartY - e.clientY;
+		const newHeight = Math.min(500, Math.max(50, this._dragStartHeight + delta));
+		this._conflictPanelHeight = newHeight;
+
+		// Direct DOM updates for smooth dragging (avoids full Lit re-render)
+		const panel = this.conflictPanelEl;
+		if (panel) {
+			panel.style.height = `${newHeight}px`;
+		}
+		const divider = this.conflictDividerEl;
+		if (divider) {
+			divider.setAttribute('aria-valuenow', String(newHeight));
+		}
+	};
+
+	private onDividerMouseUp = () => {
+		this._isDraggingDivider = false;
+		document.body.style.cursor = '';
+		document.body.style.userSelect = '';
+		document.removeEventListener('mousemove', this.onDividerMouseMove);
+		document.removeEventListener('mouseup', this.onDividerMouseUp);
+	};
 
 	private get showConflictsCommandUrl(): string {
 		return this._webview.createCommandLink('gitlens.pausedOperation.showConflicts:rebase');

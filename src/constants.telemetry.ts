@@ -322,6 +322,8 @@ export interface TelemetryEvents extends WebviewShowAbortedEvents, WebviewShownE
 	'rebaseEditor/action/recompose': RebaseEditorCompletionEventData;
 	/** Sent when the user clicks to show conflicts */
 	'rebaseEditor/action/showConflicts': RebaseEditorContextEventData;
+	/** Sent when the user opens a conflict file from the inline conflict panel */
+	'rebaseEditor/action/openConflictFile': RebaseEditorOpenConflictFileEvent;
 	/** Sent when the user reveals a ref (commit/branch) in graph or commit details */
 	'rebaseEditor/action/revealRef': RebaseEditorRevealRefEvent;
 
@@ -1194,6 +1196,11 @@ interface RebaseEditorToggleOrderingEvent extends RebaseEditorContextEventData {
 	'ordering.new': 'asc' | 'desc';
 }
 
+interface RebaseEditorOpenConflictFileEvent extends RebaseEditorContextEventData {
+	/** File extension of the opened conflict file (e.g. '.ts', '.json') */
+	'conflict.fileExtension': string;
+}
+
 interface RebaseEditorRevealRefEvent extends RebaseEditorContextEventData {
 	/** Type of ref being revealed */
 	'ref.type': 'commit' | 'branch';
@@ -1244,6 +1251,7 @@ export type RebaseEditorTelemetryEvent =
 	| 'rebaseEditor/action/toggleOrdering'
 	| 'rebaseEditor/action/recompose'
 	| 'rebaseEditor/action/showConflicts'
+	| 'rebaseEditor/action/openConflictFile'
 	| 'rebaseEditor/action/revealRef'
 	| 'rebaseEditor/entries/changed'
 	| 'rebaseEditor/entries/moved'
