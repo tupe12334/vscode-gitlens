@@ -5,6 +5,7 @@ import { ifDefined } from 'lit/directives/if-defined.js';
 import { keyed } from 'lit/directives/keyed.js';
 import type { Ref } from 'lit/directives/ref.js';
 import { createRef, ref } from 'lit/directives/ref.js';
+import { styleMap } from 'lit/directives/style-map.js';
 import { when } from 'lit/directives/when.js';
 import { GlElement } from '../element.js';
 import type { GlGitStatus } from '../status/git-status.js';
@@ -235,7 +236,7 @@ export class GlTreeGenerator extends GlElement {
 					slot="decorations"
 					title=${ifDefined(decoration.tooltip)}
 					aria-label=${ifDefined(decoration.tooltip ?? decoration.label)}
-					style=${ifDefined(decoration.color ? `color: ${decoration.color}` : undefined)}
+					style=${decoration.color ? styleMap({ color: decoration.color }) : nothing}
 					>${decoration.label}</span
 				>`;
 			}

@@ -251,7 +251,7 @@ export class RebaseWebviewProvider implements Disposable {
 		if (normalizedPath.startsWith('..') || isAbsolute(normalizedPath)) return;
 
 		this.host.sendTelemetryEvent('rebaseEditor/action/openConflictFile', {
-			'conflict.fileExtension': extname(params.path),
+			'conflict.fileExtension': extname(normalizedPath),
 		});
 
 		const uri = Uri.joinPath(Uri.file(this.repoPath), normalizedPath);
@@ -930,7 +930,8 @@ export class RebaseWebviewProvider implements Disposable {
 			const count = text.match(RebaseWebviewProvider.conflictMarkerPattern)?.length ?? 0;
 			this._conflictMarkerCache.set(key, { mtime: stat.mtime, count: count });
 			return count;
-		} catch {
+		} catch (ex) {
+			Logger.debug(ex, 'countConflictMarkers');
 			return 0;
 		}
 	}

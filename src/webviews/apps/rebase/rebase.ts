@@ -7,6 +7,7 @@ import { html, nothing } from 'lit';
 import { customElement, query, state } from 'lit/decorators.js';
 import { guard } from 'lit/directives/guard.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
+import type { GitFileConflictStatus } from '../../../git/models/fileStatus.js';
 import type { RebaseTodoCommitAction } from '../../../git/models/rebase.js';
 import { filterMap, some } from '../../../system/iterable.js';
 import { pluralize } from '../../../system/string.js';
@@ -40,7 +41,12 @@ import {
 } from '../../rebase/protocol.js';
 import { GlAppHost } from '../shared/appHost.js';
 import { scrollableBase } from '../shared/components/styles/lit/base.css.js';
-import type { TreeItemActionDetail, TreeItemSelectionDetail, TreeModel } from '../shared/components/tree/base.js';
+import type {
+	TreeItemActionDetail,
+	TreeItemDecoration,
+	TreeItemSelectionDetail,
+	TreeModel,
+} from '../shared/components/tree/base.js';
 import type { LoggerContext } from '../shared/contexts/logger.js';
 import type { HostIpc } from '../shared/ipc.js';
 import type { GlRebaseConflictIndicator } from './components/conflict-indicator.js';
@@ -58,6 +64,20 @@ import '../shared/components/checkbox/checkbox.js';
 import '../shared/components/commit-sha.js';
 import '../shared/components/overlays/popover-confirm.js';
 import '../shared/components/overlays/tooltip.js';
+
+const addedColor = 'var(--vscode-gitDecoration-addedResourceForeground)';
+const deletedColor = 'var(--vscode-gitDecoration-deletedResourceForeground)';
+const modifiedColor = 'var(--vscode-gitDecoration-modifiedResourceForeground)';
+
+const conflictStatusInfo: Partial<Record<GitFileConflictStatus, { label: string; color: string }>> = {
+	AA: { label: 'Both Added', color: addedColor },
+	AU: { label: 'Added by Us', color: addedColor },
+	UA: { label: 'Added by Them', color: addedColor },
+	DD: { label: 'Both Deleted', color: deletedColor },
+	DU: { label: 'Deleted by Us', color: deletedColor },
+	UD: { label: 'Deleted by Them', color: deletedColor },
+	UU: { label: 'Both Modified', color: modifiedColor },
+};
 
 const scrollZonePx = 80;
 const scrollSpeedPx = 8;
@@ -144,12 +164,6 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 		return (this._conflictPanelEl ??= this.shadowRoot?.querySelector<HTMLElement>('.conflict-panel') ?? null);
 	}
 
-	/** Cached conflict divider element reference (for ARIA updates during drag) */
-	private _conflictDividerEl: HTMLElement | null | undefined;
-	private get conflictDividerEl(): HTMLElement | null {
-		return (this._conflictDividerEl ??= this.shadowRoot?.querySelector<HTMLElement>('.conflict-divider') ?? null);
-	}
-
 	private get ascending(): boolean {
 		return this.state?.ascending ?? false;
 	}
@@ -204,7 +218,6 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 			document.body.style.userSelect = '';
 		}
 		this._conflictPanelEl = undefined;
-		this._conflictDividerEl = undefined;
 		super.disconnectedCallback?.();
 	}
 
@@ -1168,6 +1181,7 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 		if (conflictFiles !== this._prevConflictFiles) {
 			this._prevConflictFiles = conflictFiles;
 			this._conflictTreeModel = this.buildConflictTreeModel(conflictFiles);
+			this._conflictPanelEl = undefined;
 		}
 
 		// Set initial focus and selection when entries first arrive
@@ -1378,9 +1392,6 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 				role="separator"
 				aria-orientation="horizontal"
 				aria-label="Resize conflict panel"
-				aria-valuenow=${this._conflictPanelHeight}
-				aria-valuemin=${50}
-				aria-valuemax=${500}
 				tabindex="0"
 				@mousedown=${this.onDividerMouseDown}
 				@keydown=${this.onDividerKeyDown}
@@ -1421,19 +1432,37 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 					{ icon: 'diff', label: 'Open Current Changes', action: 'current-changes' },
 					{ icon: 'git-compare', label: 'Open Incoming Changes', action: 'incoming-changes' },
 				],
-				decorations:
-					file.conflictCount != null && file.conflictCount > 0
-						? [
-								{
-									type: 'text' as const,
-									label: `${file.conflictCount}`,
-									tooltip: pluralize('conflict', file.conflictCount),
-									color: 'var(--vscode-editorWarning-foreground, #cca700)',
-								},
-							]
-						: undefined,
+				decorations: this.getConflictDecorations(file.conflictStatus, file.conflictCount),
 			};
 		});
+	}
+
+	private getConflictDecorations(
+		conflictStatus: GitFileConflictStatus,
+		conflictCount: number | undefined,
+	): TreeItemDecoration[] | undefined {
+		const info = conflictStatusInfo[conflictStatus];
+		const decorations: TreeItemDecoration[] = [];
+
+		if (info != null) {
+			decorations.push({
+				type: 'text',
+				label: conflictStatus,
+				tooltip: info.label,
+				color: info.color,
+			});
+		}
+
+		if (conflictCount != null && conflictCount > 0) {
+			decorations.push({
+				type: 'text',
+				label: `${conflictCount}`,
+				tooltip: pluralize('conflict', conflictCount),
+				color: info?.color ?? modifiedColor,
+			});
+		}
+
+		return decorations.length ? decorations : undefined;
 	}
 
 	private onConflictTreeItemSelected(e: CustomEvent<TreeItemSelectionDetail>): void {
@@ -1464,10 +1493,10 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 
 		switch (e.key) {
 			case 'ArrowUp':
-				newHeight = Math.min(500, Math.max(50, this._conflictPanelHeight + step));
+				newHeight = Math.max(50, this._conflictPanelHeight + step);
 				break;
 			case 'ArrowDown':
-				newHeight = Math.min(500, Math.max(50, this._conflictPanelHeight - step));
+				newHeight = Math.max(50, this._conflictPanelHeight - step);
 				break;
 			default:
 				return;
@@ -1475,10 +1504,6 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 
 		e.preventDefault();
 		this._conflictPanelHeight = newHeight;
-		const panel = this.conflictPanelEl;
-		if (panel) {
-			panel.style.height = `${newHeight}px`;
-		}
 	};
 
 	private onDividerMouseDown = (e: MouseEvent) => {
@@ -1497,17 +1522,13 @@ export class GlRebaseEditor extends GlAppHost<State, RebaseStateProvider> {
 
 		// Dragging up increases panel height; CSS flex-shrink constrains the layout
 		const delta = this._dragStartY - e.clientY;
-		const newHeight = Math.min(500, Math.max(50, this._dragStartHeight + delta));
+		const newHeight = Math.max(50, this._dragStartHeight + delta);
 		this._conflictPanelHeight = newHeight;
 
 		// Direct DOM updates for smooth dragging (avoids full Lit re-render)
 		const panel = this.conflictPanelEl;
 		if (panel) {
 			panel.style.height = `${newHeight}px`;
-		}
-		const divider = this.conflictDividerEl;
-		if (divider) {
-			divider.setAttribute('aria-valuenow', String(newHeight));
 		}
 	};
 
